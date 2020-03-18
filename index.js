@@ -11,23 +11,33 @@ exports.handler = async (event, context) => {
   var codepipeline = new AWS.CodePipeline();
   var jobId = event["CodePipeline.job"].id;
   var keyName = event['CodePipeline.job'].data.actionConfiguration.configuration.UserParameters
+  console.log('{handler} invoked with event and context:', event, context);
 
   /* Helper methods */
   var putJobSuccess = (message) => {
+    console.log(`{putJobSuccess} message: ${message}`);
     var params = {
       jobId: jobId
     };
-    return codepipeline.putJobSuccessResult(params, (err, data) => {
-      if(err) {
-        context.fail(err);
-      } else {
-        console.log(mesage);
-        context.succeed(message);
-      }
+    return new Promise((resolve, reject) => {
+      console.log('{putJobSuccess} calling codepipeline.putJobSuccessResult');
+      return codepipeline.putJobSuccessResult(params, (err, data) => {
+        console.log('{putJobSuccessResult} in callback');
+        if(err) {
+          console.log('{putJobSuccess} codepipeline.putJobSuccessResult err: ', err);
+          context.fail(err);
+          return reject(err);
+        } else {
+          console.log('{putJobSuccess} codepipeline.putJobSuccessResult success: ', message);
+          context.succeed(message);
+        }
+        return resolve(message);
+      });
     });
   };
 
   var putJobFailure = (message) => {
+    console.log(`{putJobFailure} message: ${message}`);
     var params = {
       jobId: jobId,
       failureDetails: {
@@ -36,9 +46,14 @@ exports.handler = async (event, context) => {
         externalExecutionId: context.invokeid
       }
     };
-    return codepipeline.putJobFailureResult(params, (err, data) => {
-      console.log(message);
-      context.fail(message);
+    console.log('{putJobFailure} message stringified');
+    return new Promise((resolve, reject) => {
+      console.log('{putJobFailure} calling codepipeline.putJobFailureResult');
+      return codepipeline.putJobFailureResult(params, (err, data) => {
+        console.log('{putJobFailure} codepipeline.putJobFailureResult', err, message);
+        context.fail(message);
+        return reject(message);
+      });
     });
   };
 
@@ -54,15 +69,15 @@ exports.handler = async (event, context) => {
     repoImages = await ecr.describeImages(imageParams).promise()
   }
   catch (err) {
-    console.log(err);
-    putJobFailure(`Error fetching images for repository ${keyName}`)
+    console.log('{handler} ecr.describeImages:', imageParams, ' exception:', err);
+    return putJobFailure(`Error fetching images for repository ${keyName}`)
   } 
   var sortedImages = repoImages.imageDetails.sort((a, b) => {
     return b.imagePushedAt - a.imagePushedAt;
   })
   var latestImage = sortedImages[0]
   if (!latestImage) {
-    putJobFailure(`Missing images for repository ${keyName}`)
+    return putJobFailure(`Missing images for repository ${keyName}`)
   }
   var latestImageTag = latestImage.imageTags[0]
 
@@ -75,21 +90,24 @@ exports.handler = async (event, context) => {
     repoData = await ecr.describeRepositories(repoParams).promise()
   }
   catch (err) {
-    console.log(err);
-    putJobFailure(`Error fetching repository ${keyName} detail`)
+    console.log('{handler} ecr.describeRepositories repoParams:', repoParams, ' exception:', err);
+    return putJobFailure(`Error fetching repository ${keyName} detail`)
   }
   var targetRepo = repoData.repositories[0]
   if (!targetRepo) {
-    putJobFailure(`Missing repository for name ${keyName}`)
+    return putJobFailure(`Missing repository for name ${keyName}`)
   }
   var repoURI = targetRepo.repositoryUri
 
   /* FINAL IMAGE URI */
   var imageUri = `${repoURI}:${latestImageTag}`
 
+  console.log('{handler} prepare default kubernetes client.listNamespacedDeployment');
+
   /* Prepare kubernetes client */
   return client.listNamespacedDeployment('default')
     .then((res) => {
+      console.log('{listNamespacedDeployment.then} res: ', res);
       var deployments = res.body.items
       var existDeployment = deployments.find((item) => {
         return item.metadata.name === keyName
@@ -97,6 +115,7 @@ exports.handler = async (event, context) => {
 
       /* Already deployed, update the deployment */
       if (existDeployment !== undefined) {
+        console.log('{listNamespacedDeployment.then} patchNamespacedDeployment:', keyName);
         return patchClient.patchNamespacedDeployment(keyName, 'default', {
           spec: {
             template: {
@@ -112,11 +131,11 @@ exports.handler = async (event, context) => {
           }
         })
         .then(() => {
-          console.log('Patch success');
-          return putJobSuccess("Deploy success.");
+          console.log('{patchNamespacedDeployment.then} Patch success');
+          return putJobSuccess("Patch success.");
         })
         .catch((err) => {
-          console.log(err); 
+          console.log('{patchNamespacedDeployment.catch} patchNamespacedDeployment exception:', err); 
           return putJobFailure(err)
         })
       } else {
@@ -128,19 +147,21 @@ exports.handler = async (event, context) => {
 
         var deployConfig = yaml.safeLoad(raw)
 
+        console.log('{listNamespacedDeployment.then} created new deployConfig:', deployConfig);
+
         return client.createNamespacedDeployment('default', deployConfig)
           .then(() => {
-            console.log('success');
+            console.log('{createNamespacedDeployment.then} success');
             return putJobSuccess("Deploy success.");
           })
           .catch((err) => {
-            console.log(err);
+            console.log('{createNamespacedDeployment.catch} err:', err);
             return putJobFailure(err)
           })
       }
     })
     .catch((err) => {
-      console.log(err);
+      console.log('{listNamespacedDeployment.catch} err:', err);
       return putJobFailure(err)
     })
 }
